@@ -57,13 +57,6 @@ async function setup() {
   createCanvas(windowWidth, windowHeight);
   ctx = drawingContext;
 
-  // 앞 카메라. 크기는 카메라가 주는 대로
-  video = createCapture(
-    { video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
-    { flipped: true }
-  );
-  video.hide();
-
   bindUI();
   initFirebase();
 
@@ -73,7 +66,34 @@ async function setup() {
   if (me) enterGarden(); else showJoin();
 
   handPose = await ml5.handPose({ flipped: true, maxHands: 1 });
-  handPose.detectStart(video, (r) => { hands = r; });
+  if (video) handPose.detectStart(video, gotHands); // 모델이 늦게 준비된 경우
+}
+
+function gotHands(r) { hands = r; }
+
+// ───────── 카메라: 보내기/받기 화면에서만 켜기 ─────────
+function startCamera() {
+  if (video) return;
+  // 앞 카메라. 크기는 카메라가 주는 대로
+  video = createCapture(
+    { video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
+    { flipped: true }
+  );
+  video.hide();
+  if (handPose) handPose.detectStart(video, gotHands);
+}
+
+function stopCamera() {
+  if (!video) return;
+  try { if (handPose) handPose.detectStop(); } catch (e) {}
+  try {
+    const st = video.elt && video.elt.srcObject;
+    if (st) st.getTracks().forEach((t) => t.stop());
+    video.remove();
+  } catch (e) {}
+  video = null;
+  hands = [];
+  gesture = rawGesture = "none";
 }
 
 function windowResized() { resizeCanvas(windowWidth, windowHeight); }
@@ -170,6 +190,7 @@ function showJoin() { mode = "join"; show("join", true); setButtons(); }
 
 function enterGarden() {
   mode = "garden";
+  stopCamera();
   show("join", false); show("picker", false);
   if (db && me) db.ref("users/" + me.id).set({ name: me.name, hue: me.hue, joined: me.joined || Date.now() });
   setButtons();
@@ -200,6 +221,7 @@ function startSend(to) {
   show("picker", false);
   sendTo = to;
   mode = "send";
+  startCamera();
   todayDay = null;
   setSendState("WAIT");
   setButtons();
@@ -209,6 +231,7 @@ function startReceive(r) {
   startMic();
   recvRec = r; recvOpenSince = 0; recvLandAt = 0; recvDone = false;
   mode = "receive";
+  startCamera();
   tip = null;
   setButtons();
 }
@@ -229,9 +252,10 @@ function bindUI() {
   });
   document.getElementById("back").onclick = enterGarden;
 
-  const cv = document.querySelector("canvas");
-  cv.addEventListener("pointerdown", (e) => canvasTap(e.clientX, e.clientY, true));
-  cv.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") canvasTap(e.clientX, e.clientY, false); });
+  // 캔버스가 바뀌어도 동작하도록 문서 전체에서 받음 (버튼·창 위의 클릭은 제외)
+  const onUI = (e) => e.target.closest && e.target.closest("button, input, .overlay");
+  document.addEventListener("pointerdown", (e) => { if (!onUI(e)) canvasTap(e.clientX, e.clientY, true); });
+  document.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse" && !onUI(e)) canvasTap(e.clientX, e.clientY, false); });
 
   window.addEventListener("keydown", (e) => {
     if (document.activeElement && document.activeElement.tagName === "INPUT") return;
@@ -279,7 +303,7 @@ function draw() {
   ctx.fillRect(0, 0, W, H);
   micLevel = getMicLevel();
 
-  const hand = hands.length ? toScreen(hands[0]) : null;
+  const hand = video && hands.length ? toScreen(hands[0]) : null;
   updateGesture(hand);
   if (hand) lastPalm = palmCenter(hand);
 
@@ -342,7 +366,7 @@ function drawGarden(W, H) {
     const by = H * 0.36 + Math.sin(T * 1.2 + ph) * H * 0.09 + i * 20;
     const s = 42 * k * 1.2;
     drawButterfly(bx, by, s, daysOf(r), flapAt(4, ph), hueOf(r.from));
-    hitButterflies.push({ x: bx, y: by, r: s * 1.1, rec: r });
+    hitButterflies.push({ x: bx, y: by, r: Math.max(s * 1.4, 60), rec: r });
   });
 
   // 안내
@@ -486,6 +510,7 @@ function flapAt(speed, ph = 0) { return 0.3 + 0.7 * Math.abs(Math.sin(millis() *
 function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
 
 function drawVideo() {
+  if (!video) return;
   const v = videoRect();
   ctx.save(); ctx.globalAlpha = 0.6;
   image(video, v.x, v.y, v.w, v.h);
